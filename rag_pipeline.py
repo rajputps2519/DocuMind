@@ -4,7 +4,7 @@ Core RAG logic:
   1. Embed document chunks with a free Hugging Face model
   2. Store vectors in FAISS
   3. At query time: embed the question, retrieve top-k chunks,
-     pass them as context to a Hugging Face LLM, return the answer.
+     pass them as context to Groq LLM, return the answer.
 """
 
 from dotenv import load_dotenv
@@ -12,8 +12,8 @@ load_dotenv()
 
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
-
 from langchain_core.prompts import PromptTemplate
+import requests
 import os
 
 
@@ -21,11 +21,13 @@ import os
 # Free embedding model (~90 MB, runs locally, no API key needed)
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-# Free HF Inference API model (requires HF_TOKEN env var — free tier is fine)
-# You can swap this for any text-generation model on Hugging Face Hub
-LLM_MODEL = "google/gemma-2-2b-it"
+# Groq model — fast, free, reliable
+# Alternatives: "mixtral-8x7b-32768", "gemma2-9b-it", "llama-3.3-70b-versatile"
+LLM_MODEL = "llama-3.1-8b-instant"
 
 TOP_K = 4   # number of chunks to retrieve per query
+
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
 # ── Prompt template ───────────────────────────────────────────────────────────
@@ -55,44 +57,59 @@ def build_vector_store(chunks: list) -> FAISS:
 
 
 def get_answer(question: str, vector_store: FAISS) -> tuple[str, list[str]]:
-    hf_token = os.getenv("HF_TOKEN")
-    if not hf_token:
-        return ("⚠️ HF_TOKEN not set.", [])
+    """
+    Retrieve relevant chunks and generate an answer using Groq.
+    Returns (answer_text, list_of_source_snippets).
+    """
+    # ── Check API key ─────────────────────────────────────────────────────────
+    groq_key = os.getenv("GROQ_API_KEY1")
+    if not groq_key:
+        return ("⚠️ GROQ_API_KEY not set. Add it to your .env file.", [])
 
+    # ── Retrieve relevant chunks from FAISS ───────────────────────────────────
     retriever = vector_store.as_retriever(
         search_type="similarity", search_kwargs={"k": TOP_K}
     )
     docs = retriever.invoke(question)
     context = "\n\n".join([doc.page_content for doc in docs])
+
+    # ── Build prompt ──────────────────────────────────────────────────────────
     prompt = RAG_PROMPT.format(context=context, question=question)
 
-    import requests
+    # ── Call Groq API ─────────────────────────────────────────────────────────
     headers = {
-        "Authorization": f"Bearer {hf_token}",
+        "Authorization": f"Bearer {groq_key}",
         "Content-Type": "application/json"
     }
-
     payload = {
-        "model": "google/gemma-2-2b-it",
+        "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 512,
         "temperature": 0.3
     }
 
-    response = requests.post(
-        "https://router.huggingface.co/hf-inference/models/google/gemma-2-2b-it/v1/chat/completions",
-        headers=headers,
-        json=payload
-    )
+    try:
+        response = requests.post(
+            GROQ_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        result = response.json()
 
-    result = response.json()
+        if "choices" in result:
+            answer = result["choices"][0]["message"]["content"]
+        elif "error" in result:
+            answer = f"❌ Groq error: {result['error']['message']}"
+        else:
+            answer = f"❌ Unexpected response: {str(result)}"
 
-    if "choices" in result:
-        answer = result["choices"][0]["message"]["content"]
-    elif "error" in result:
-        answer = f"❌ Model error: {result['error']}"
-    else:
-        answer = str(result)
+    except requests.exceptions.Timeout:
+        answer = "❌ Request timed out. Please try again."
+    except requests.exceptions.ConnectionError:
+        answer = "❌ Connection error. Check your internet connection."
+    except Exception as e:
+        answer = f"❌ Unexpected error: {str(e)}"
 
     sources = [doc.page_content for doc in docs]
     return answer, sources

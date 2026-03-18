@@ -4,17 +4,17 @@ Handles loading and splitting text from PDFs and URLs into chunks.
 """
 import os
 os.environ["USER_AGENT"] = "DocuMind/1.0"
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, WebBaseLoader
 import tempfile
 
 
-
 def _split(docs):
     """Split documents into smaller chunks for embedding."""
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,       # characters per chunk
-        chunk_overlap=50,     # overlap keeps context across boundaries
+        chunk_size=500,
+        chunk_overlap=50,
         separators=["\n\n", "\n", ".", " ", ""],
     )
     return splitter.split_documents(docs)
@@ -30,8 +30,16 @@ def load_pdf(uploaded_file) -> list:
         tmp_path = tmp.name
 
     try:
-        loader = PyPDFLoader(tmp_path)
+        loader = PyPDFLoader(tmp_path, extract_images=False)
         docs = loader.load()
+
+        # Fix encoding issues
+        for doc in docs:
+            doc.page_content = doc.page_content.encode(
+                "utf-8", errors="ignore"
+            ).decode("utf-8")
+            doc.page_content = " ".join(doc.page_content.split())
+
     finally:
         os.unlink(tmp_path)
 
